@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC Network Template
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.103.0.0/16
+    Description: ""
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.103.0.0/24
+    Description: ""
+  KeyPair:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+  AL2Image:
+    Type: AWS::EC2::Image::Id
+    Default: ami-02d36247c5bc58c23
+    Description: Latest version as of November 9, 2022
+  AllowHTTPCidr:
+    Type: String
+    Default: 0.0.0.0/0
+  AllowSSHCidr:
+    Type: String
+    Description: "http://checkip.amazonaws.com/"
+  SslSubject:
+    Type: String
+    Default: /C=JP/ST=Hokkaido/L=Sapporo/O=Hoge/OU=Piyo/CN=hoge.com
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+      - Key: Name
+        Value: iwasa-privatevpc
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: AttachGateway
+    Properties:
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, "Fn::GetAZs": {Ref: "AWS::Region"}]
+      CidrBlock: !Ref PublicSubnet1Cidr
+      Tags:
+      - Key: Name
+        Value: iwasa-privatevpc-public-1a-subnet
+      VpcId: !Ref VPC
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: iwasa-privatevpc-igw
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: iwasa-privatevpc-public-rt
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      Tags:
+        - Key: Name
+          Value: iwasa-privatevpc-web
+      InstanceType: t3.micro
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 10
+            DeleteOnTermination: true
+            Encrypted: true
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      ImageId: !Ref AL2Image
+      KeyName: !Ref KeyPair
+      EbsOptimized: true
+      UserData:
+        Fn::Base64: !Sub
+        - |
+          #cloud-config
+          repo_update: true
+          repo_upgrade: all
+          packages:
+           - httpd
+           - mod_ssl
+           - openssl
+           - php
+          runcmd:
+           - openssl genrsa -out ca.key 2048
+           - openssl req -new -key ca.key -out ca.csr -subj "${sslsubject}"
+           - openssl x509 -req -days 365 -in ca.csr -signkey ca.key -out ca.crt
+           - cp -p ca.crt /etc/pki/tls/certs/
+           - cp -p ca.key /etc/pki/tls/private/
+           - cp -p ca.csr /etc/pki/tls/private/
+           - sed -i 's/localhost/ca/g' /etc/httpd/conf.d/ssl.conf
+           - service httpd start
+           - chkconfig httpd on
+          write_files:
+          - path: /var/www/html/index.php
+            permissions: 0644
+            owner: root
+            content: |
+              <?php 
+                echo "<pre>";
+                var_dump($_SERVER);
+                echo "</pre>"; 
+              ?>
+        - { sslsubject: !Ref SslSubject }
+
+  WebSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "web server"
+      GroupName: iwasa-privatevpc-web-sg
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: iwasa-privatevpc-web-sg
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowHTTPCidr
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowHTTPCidr
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowSSHCidr
