@@ -1,10 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: VPC Network Template
+Description: Hoge Hoge Template
 Parameters:
   VpcCidr:
     Type: String
     Default: 10.103.0.0/16
     Description: ""
+  AmazonProvidedDns:
+    Type: String
+    Default: 10.103.0.2
   PublicSubnet1Cidr:
     Type: String
     Default: 10.103.0.0/24
@@ -24,7 +27,10 @@ Parameters:
     Description: "http://checkip.amazonaws.com/"
   SslSubject:
     Type: String
-    Default: /C=JP/ST=Hokkaido/L=Sapporo/O=Hoge/OU=Piyo/CN=hoge.com
+    Default: /C=JP/ST=Hokkaido/L=Sapporo/O=Hoge/OU=Piyo/CN=iwasa20211114.com
+  HosteZone:
+    Type: String
+    Default: iwasa20211114.com
 
 Resources:
   VPC:
@@ -83,6 +89,7 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
+  # Web Server
   WebServer:
     Type: AWS::EC2::Instance
     Properties:
@@ -135,7 +142,6 @@ Resources:
                 echo "</pre>"; 
               ?>
         - { sslsubject: !Ref SslSubject }
-
   WebSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
     Properties:
@@ -158,3 +164,125 @@ Resources:
           FromPort: 22
           ToPort: 22
           CidrIp: !Ref AllowSSHCidr
+
+  # DNS Server
+  DnsServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      Tags:
+        - Key: Name
+          Value: iwasa-privatevpc-dns
+      InstanceType: t3.micro
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 10
+            DeleteOnTermination: true
+            Encrypted: true
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref DnsSecurityGroup
+      ImageId: !Ref AL2Image
+      KeyName: !Ref KeyPair
+      EbsOptimized: true
+      UserData:
+        Fn::Base64: !Sub
+        - |
+          #cloud-config
+          repo_update: true
+          repo_upgrade: all
+          packages:
+           - bind
+          runcmd:
+           - /etc/init.d/named start
+           - chkconfig named on
+          write_files:
+          - path: /etc/named.conf
+            permissions: 0644
+            owner: root
+            content: |
+              options {
+                  listen-on-v6 port 53 { ::1; };
+                  directory     "/var/named";
+                  dump-file     "/var/named/data/cache_dump.db";
+                  statistics-file "/var/named/data/named_stats.txt";
+                  memstatistics-file "/var/named/data/named_mem_stats.txt";
+                  recursing-file  "/var/named/data/named.recursing";
+                  secroots-file   "/var/named/data/named.secroots";
+                  allow-query     { any; };
+                  recursion no;
+                  dnssec-enable yes;
+                  dnssec-validation yes;
+                  bindkeys-file "/etc/named.root.key";
+                  managed-keys-directory "/var/named/dynamic";
+                  pid-file "/run/named/named.pid";
+                  session-keyfile "/run/named/session.key";
+                  forwarders { ${providedDns}; };
+              };
+              logging {
+                      channel default_debug {
+                              file "data/named.run";
+                              severity dynamic;
+                      };
+              };
+              zone "." IN {
+                  type hint;
+                  file "named.ca";
+              };
+              zone "${zonename}" IN {
+                  type hint;
+                  file "${zonename}";
+              };
+              include "/etc/named.rfc1912.zones";
+              include "/etc/named.root.key";
+          - path: /var/named/${zonename}
+            permissions: 0644
+            owner: root
+            content: |
+              $TTL      86400
+              @         IN       SOA     ns01.${zonename}. (
+                                          2021111401 
+                                          3600
+                                          3600
+                                          604800
+                                          86400 )
+              @         IN NS ns.${zonename}.
+              @         IN A ${webServerIp}
+        - { zonename: !Ref HosteZone, webServerIp: !GetAtt WebServer.PrivateIp, providedDns: !Ref AmazonProvidedDns }
+  DnsSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "dns server"
+      GroupName: iwasa-privatevpc-dns-sg
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: iwasa-privatevpc-dns-sg
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: !Ref VpcCidr
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: !Ref VpcCidr
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowSSHCidr
+
+  DHCPOptions:
+    Type: AWS::EC2::DHCPOptions
+    Properties:
+      DomainNameServers:
+        - !GetAtt DnsServer.PrivateIp
+      Tags:
+        - Key: Name
+          Value: iwasa-privatevpc-dhcp
+  DHCPAssociation:
+    Type: AWS::EC2::VPCDHCPOptionsAssociation
+    Properties:
+      VpcId: !Ref VPC
+      DhcpOptionsId: !Ref DHCPOptions
