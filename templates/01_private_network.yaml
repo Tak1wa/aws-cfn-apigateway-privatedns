@@ -12,6 +12,10 @@ Parameters:
     Type: String
     Default: 10.103.0.0/24
     Description: ""
+  ProtectedSubnet1Cidr:
+    Type: String
+    Default: 10.103.10.0/24
+    Description: ""
   KeyPair:
     Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
     Type: AWS::EC2::KeyPair::KeyName
@@ -22,9 +26,6 @@ Parameters:
   AllowHTTPCidr:
     Type: String
     Default: 0.0.0.0/0
-  AllowSSHCidr:
-    Type: String
-    Description: "http://checkip.amazonaws.com/"
   SslSubject:
     Type: String
     Default: /C=JP/ST=Hokkaido/L=Sapporo/O=Hoge/OU=Piyo/CN=iwasa20211114.com
@@ -61,6 +62,22 @@ Resources:
       SubnetId: !Ref PublicSubnet1
       RouteTableId: !Ref PublicRouteTable
 
+  ProtectedSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: AttachGateway
+    Properties:
+      AvailabilityZone: !Select [ 0, "Fn::GetAZs": {Ref: "AWS::Region"}]
+      CidrBlock: !Ref ProtectedSubnet1Cidr
+      Tags:
+      - Key: Name
+        Value: iwasa-privatevpc-protect-1a-subnet
+      VpcId: !Ref VPC
+  ProtectedSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ProtectedSubnet1
+      RouteTableId: !Ref ProtectedRouteTable1
+
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -89,6 +106,36 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
+  ProtectedRouteTable1:
+    Type: AWS::EC2::RouteTable
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: iwasa-privatevpc-protect-1a-rt
+  ProtectedRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ProtectedRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EipNatGateway1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+      - Key: Name
+        Value:  iwasa-privatevpc-ngw-1a
+  EipNatGateway1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: iwasa-privatevpc-ngw-1a-eip
+
   # Web Server
   WebServer:
     Type: AWS::EC2::Instance
@@ -104,7 +151,7 @@ Resources:
             VolumeSize: 10
             DeleteOnTermination: true
             Encrypted: true
-      SubnetId: !Ref PublicSubnet1
+      SubnetId: !Ref ProtectedSubnet1
       SecurityGroupIds:
         - !Ref WebSecurityGroup
       ImageId: !Ref AL2Image
@@ -160,10 +207,6 @@ Resources:
           FromPort: 443
           ToPort: 443
           CidrIp: !Ref AllowHTTPCidr
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: !Ref AllowSSHCidr
 
   # DNS Server
   DnsServer:
@@ -180,7 +223,7 @@ Resources:
             VolumeSize: 10
             DeleteOnTermination: true
             Encrypted: true
-      SubnetId: !Ref PublicSubnet1
+      SubnetId: !Ref ProtectedSubnet1
       SecurityGroupIds:
         - !Ref DnsSecurityGroup
       ImageId: !Ref AL2Image
@@ -195,7 +238,7 @@ Resources:
           packages:
            - bind
           runcmd:
-           - /etc/init.d/named start
+           - service named start
            - chkconfig named on
           write_files:
           - path: /etc/named.conf
@@ -231,7 +274,7 @@ Resources:
                   file "named.ca";
               };
               zone "${zonename}" IN {
-                  type hint;
+                  type master;
                   file "${zonename}";
               };
               include "/etc/named.rfc1912.zones";
@@ -241,14 +284,15 @@ Resources:
             owner: root
             content: |
               $TTL      86400
-              @         IN       SOA     ns01.${zonename}. (
+              @         IN       SOA     dns.${zonename}. root.${zonename}. (
                                           2021111401 
                                           3600
                                           3600
                                           604800
                                           86400 )
-              @         IN NS ns.${zonename}.
-              @         IN A ${webServerIp}
+                       IN NS ns.${zonename}.
+                       IN A ${webServerIp}
+              ns.${zonename}.  IN   A   127.0.0.1
         - { zonename: !Ref HosteZone, webServerIp: !GetAtt WebServer.PrivateIp, providedDns: !Ref AmazonProvidedDns }
   DnsSecurityGroup:
     Type: "AWS::EC2::SecurityGroup"
@@ -268,11 +312,6 @@ Resources:
           FromPort: 53
           ToPort: 53
           CidrIp: !Ref VpcCidr
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: !Ref AllowSSHCidr
-
   DHCPOptions:
     Type: AWS::EC2::DHCPOptions
     Properties:
